@@ -14,6 +14,7 @@ import { SyncIndicator } from './components/SyncIndicator';
 import { ToastProvider } from './components/Toast';
 import { useSyncStatus } from './sync';
 import { ensureSomebody } from './lib/repo';
+import { supabase } from './supabase';
 
 function ScrollToTop() {
   const { pathname } = useLocation();
@@ -23,7 +24,7 @@ function ScrollToTop() {
   return null;
 }
 
-/** Makes sure the "Somebody" pseudo-cat exists, once the first sync has pulled the server copy. */
+/** Makes sure the "Somebody" pseudo-cat exists once the first sync has pulled the server copy, and saves the time zone. */
 function SomebodyKeeper() {
   const { session } = useAuth();
   const status = useSyncStatus();
@@ -32,6 +33,12 @@ function SomebodyKeeper() {
     if (done.current || !status.lastSyncedAt) return;
     done.current = true;
     void ensureSomebody(session.user.id);
+    // Lets events logged by email or shortcut use this person's local time. Best effort.
+    const time_zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    void supabase
+      .from('catlog_user_settings')
+      .upsert({ user_id: session.user.id, time_zone, updated_at: new Date().toISOString() })
+      .then(() => undefined, () => undefined);
   }, [status.lastSyncedAt, session.user.id]);
   return null;
 }

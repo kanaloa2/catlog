@@ -3,16 +3,21 @@
  *
  *   GET or POST /api/add?k=KEY&cat=Stormy&type=poo   one-tap logging for iOS Shortcuts, widgets, Siri
  *   POST        /api/log  { k, text }                 logs every "<cat> pooed/barfed" line in some text
- *   email()                                           the same, for mail sent to an Email Routing address
+ *   email()                                           mail Cc'd or Bcc'd to CatLog's Email Routing address
  *
- * All of them call database functions that check the shortcut key, so the worker holds no secrets
- * of its own. The Supabase URL and publishable key are public (the same ones the app ships).
+ * Email is matched to the sender: a mail from the address someone signs in to CatLog with logs
+ * events for that person. The worker only trusts the From address when the receiving server's
+ * DKIM or SPF check passed for that domain, then calls the database with CATLOG_EMAIL_SECRET (a
+ * worker secret; the database keeps only its hash). The other routes check a shortcut key.
+ * The Supabase URL and publishable key are public (the same ones the app ships).
  */
 
 interface Env {
   ASSETS: { fetch(req: Request): Promise<Response> };
   SUPABASE_URL: string;
   SUPABASE_KEY: string;
+  /** Secret shared with the database (catlog_mail_gateway) for logging mail by its sender. */
+  CATLOG_EMAIL_SECRET?: string;
   /** Optional: shortcut key used for mail that arrives through Email Routing. */
   CATLOG_EMAIL_KEY?: string;
   /** Optional: comma-separated sender addresses allowed to log by email. Empty = anyone who knows the address. */
@@ -156,25 +161,75 @@ export function mailText(raw: string): string {
   return (cut >= 0 ? text.slice(0, cut) : text).trim();
 }
 
-async function email(message: EmailMessage, env: Env): Promise<void> {
-  const allowed = (env.CATLOG_EMAIL_FROM ?? '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (allowed.length && !allowed.includes(message.from.toLowerCase())) {
-    message.setReject('This address only takes CatLog updates from its owner.');
-    return;
+/** The bare address in a From header such as `"Chris B" <chris@example.com>`. */
+export function fromAddress(head: string): string {
+  const from = decodeWords(header(head, 'From'));
+  const m = /<([^<>\s]+@[^<>\s]+)>/.exec(from) ?? /([^\s<>"',;]+@[^\s<>"',;]+)/.exec(from);
+  return (m?.[1] ?? '').toLowerCase();
+}
+
+const aligned = (domain: string, from: string) => domain.includes(".") && (from === domain || from.endsWith(`.${domain}`) || domain.endsWith(`.${from}`));
+
+/**
+ * Whether the receiving server vouched for the From address. Reads the top Authentication-Results
+ * header (the one the receiving server added; anything lower down could be forged by the sender)
+ * and needs a DMARC, DKIM or SPF pass for the From address's domain.
+ */
+export function senderVerified(head: string, address: string): boolean {
+  const domain = address.split('@')[1]?.toLowerCase();
+  if (!domain) return false;
+  const unfolded = head.replace(/\r?\n[ \t]+/g, ' ');
+  const top = /^Authentication-Results:\s*(.*)$/im.exec(unfolded)?.[1]?.toLowerCase();
+  if (!top) return false;
+  for (const part of top.split(';').map((s) => s.trim())) {
+    const result = /^(dmarc|dkim|spf)=(\w+)/.exec(part);
+    if (!result || result[2] !== 'pass') continue;
+    const d =
+      result[1] === 'dmarc'
+        ? /header\.from=([^\s;]+)/.exec(part)?.[1]
+        : result[1] === 'dkim'
+          ? /header\.(?:d|i)=@?([^\s;]+)/.exec(part)?.[1]
+          : /smtp\.mailfrom=(?:[^\s;@]*@)?([^\s;]+)/.exec(part)?.[1];
+    if (d && aligned(d.replace(/^@/, ''), domain)) return true;
   }
+  return false;
+}
+
+async function email(message: EmailMessage, env: Env): Promise<void> {
+  const raw = await new Response(message.raw).text();
+  const { head } = splitHead(raw);
+  const subject = decodeWords(header(head, 'Subject')).replace(/^((re|fw|fwd):\s*)+/i, '');
+  const text = `${subject}\n${mailText(raw)}`;
+
+  // A key in the address (catlog+KEY@…) or a fixed key still works, for automations.
   const plus = /\+([A-Za-z0-9_-]{16,})@/.exec(message.to)?.[1];
   const key = plus ?? env.CATLOG_EMAIL_KEY ?? '';
-  if (!key) {
+  if (key) {
+    const allowed = (env.CATLOG_EMAIL_FROM ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (allowed.length && !allowed.includes(fromAddress(head)) && !allowed.includes(message.from.toLowerCase())) {
+      message.setReject('This address only takes CatLog updates from its owner.');
+      return;
+    }
+    await rpc(env, 'catlog_log_text', { p_key: key, p_text: text, p_source: 'email' });
+    return;
+  }
+
+  // Otherwise: log for whoever signs in to CatLog with the From address.
+  if (!env.CATLOG_EMAIL_SECRET) {
     message.setReject('CatLog isn’t set up for email yet.');
     return;
   }
-  const raw = await new Response(message.raw).text();
-  const { head } = splitHead(raw);
-  const subject = decodeWords(header(head, 'Subject')).replace(/^(re|fw|fwd):\s*/i, '');
-  await rpc(env, 'catlog_log_text', { p_key: key, p_text: `${subject}\n${mailText(raw)}`, p_source: 'email' });
+  const from = fromAddress(head);
+  if (!from || !senderVerified(head, from)) {
+    message.setReject('CatLog couldn’t confirm this mail came from its sender, so nothing was logged.');
+    return;
+  }
+  const result = await rpc(env, 'catlog_log_email', { p_secret: env.CATLOG_EMAIL_SECRET, p_from: from, p_text: text });
+  // A sender with no CatLog account gets a bounce that says so. Mail with no cat in it is dropped quietly.
+  if (result.unknown_sender) message.setReject(`${from} isn’t a CatLog sign-in, so nothing was logged.`);
 }
 
 export default {
