@@ -20,8 +20,9 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['icon.svg'],
       workbox: {
-        // The sign-in popup must load the real redirect page, never the cached app shell.
-        navigateFallbackDenylist: [/auth-redirect\.html/],
+        // The sign-in popup must load the real redirect page, and /api links (shortcuts) must reach
+        // the worker, never the cached app shell.
+        navigateFallbackDenylist: [/auth-redirect\.html/, /^\/api\//],
       },
       manifest: {
         name: 'CatLog',
