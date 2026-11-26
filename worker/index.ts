@@ -47,7 +47,7 @@ function reply(req: Request, url: URL, body: Json): Response {
   const headers = { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' };
   return wantsJson
     ? Response.json(body, { status, headers })
-    : new Response(String(body.message ?? (body.ok ? 'Logged' : 'Something went wrong')), { status, headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } });
+    : new Response(String(body.message ?? body.error ?? (body.ok ? 'Logged' : 'Something went wrong')), { status, headers: { ...headers, 'Content-Type': 'text/plain; charset=utf-8' } });
 }
 
 async function params(req: Request, url: URL): Promise<Record<string, string>> {

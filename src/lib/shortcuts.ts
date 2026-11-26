@@ -93,5 +93,6 @@ export const PUBLIC_KEY = SUPABASE_KEY;
 export async function logText(key: string, text: string): Promise<{ ok: boolean; message: string }> {
   const { data, error } = await supabase.rpc('catlog_log_text', { p_key: key, p_text: text, p_source: 'app' });
   if (error) return { ok: false, message: error.message };
-  return data as { ok: boolean; message: string };
+  const r = data as { ok: boolean; message?: string; error?: string };
+  return { ok: r.ok, message: r.message ?? r.error ?? (r.ok ? 'Logged.' : 'Nothing was logged.') };
 }
