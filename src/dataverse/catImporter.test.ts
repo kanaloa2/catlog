@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { db } from '../db';
 import * as repo from '../lib/repo';
-import { applyPlan, buildPlan, guessColumns, guessTables, numberOf, parseTitle, type Mapping, type TableMeta } from './catImporter';
+import { applyPlan, buildPlan, guessColumns, guessTables, numberOf, parseTitle, preferLinkedEventTable, stableId, type Mapping, type TableMeta } from './catImporter';
 import type { DataverseConfig } from './config';
 
 const cfg: DataverseConfig = { envUrl: 'https://x.crm.dynamics.com', clientId: '', tenantId: '' };
@@ -53,6 +53,14 @@ describe('guessing', () => {
     const list = [t('msdyn_aievent', 'AI Event'), t('cr282_cat', 'Cat'), t('cr282_poop', 'Poop'), t('cr9_event', 'Event'), t('adx_webpage', 'Web Page')];
     expect(guessTables(list)).toEqual({ catTable: 'cr282_cat', eventTable: 'cr282_poop' });
     expect(guessTables([...list, t('cr282_catevent', 'Cat Event')])).toEqual({ catTable: 'cr282_cat', eventTable: 'cr282_catevent' });
+  });
+  it('never guesses a Microsoft events table, and prefers one that looks up the cats', () => {
+    const t = (logicalName: string, displayName: string) => ({ logicalName, displayName, entitySet: logicalName + 's', isCustom: true });
+    const list = [t('msdyn_aievent', 'AI Event'), t('cr282_cat', 'Cat'), t('cr282_mess', 'Kitty Stuff'), t('cr282_food', 'Food')];
+    expect(guessTables(list).eventTable).toBe('cr282_mess');
+    const two = [t('msdyn_aievent', 'AI Event'), t('cr282_cat', 'Cat'), t('cr282_a', 'Alpha'), t('cr282_b', 'Beta')];
+    expect(guessTables(two).eventTable).toBe('');
+    expect(preferLinkedEventTable(two, ['msdyn_aievent', 'cr282_b'], '')).toBe('cr282_b');
   });
   it('matches columns', () => {
     const g = guessColumns(catMeta, eventMeta);
@@ -110,5 +118,31 @@ describe('import', () => {
     await applyPlan(cfg, await buildPlan(src, m, { cat: catMeta, event: eventMeta }, 'u1'), { includePhotos: false });
     expect(await db.events.count()).toBe(3);
     expect(await db.cats.count()).toBe(4);
+  });
+  it('treats a "Stormy & The Bandit" cat as both cats, and prefers a clear title over an odd type', async () => {
+    await repo.ensureSomebody('u1');
+    const m: Mapping = { catTable: 'cr1_kitty', eventTable: 'cr1_kittyevent', ...guessColumns(catMeta, eventMeta) };
+    const F = '@OData.Community.Display.V1.FormattedValue';
+    const src = {
+      cats: [
+        { cr1_kittyid: 'k1', cr1_name: 'Stormy' },
+        { cr1_kittyid: 'k2', cr1_name: 'The Bandit' },
+        { cr1_kittyid: 'k4', cr1_name: 'Stormy & The Bandit' },
+      ],
+      events: [
+        { cr1_kittyeventid: 'e1', cr1_title: 'Stormy & The Bandit Barfed', _cr1_kitty_value: 'k4', cr1_eventtype: 9, [`cr1_eventtype${F}`]: 'Text', cr1_when: '2026-11-25T18:22:00Z' },
+      ],
+    };
+    // An earlier import made the pair a cat of its own.
+    const comboId = await stableId('dv-cat|k4');
+    await db.cats.put({ id: comboId, name: 'Stormy & The Bandit', isSomebody: false, notes: '', birthday: '', color: '', sortOrder: 5, archived: false, createdAt: 1, updatedAt: 1 });
+    const plan = await buildPlan(src, m, { cat: catMeta, event: eventMeta }, 'u1');
+    expect(plan.cats.map((c) => c.name)).toEqual(['Stormy', 'The Bandit']);
+    await applyPlan(cfg, plan, { includePhotos: false });
+    const cats = await db.cats.toArray();
+    expect(cats.map((c) => c.name).sort()).toEqual(['Somebody', 'Stormy', 'The Bandit']);
+    const byId = new Map(cats.map((c) => [c.id, c.name]));
+    const [e] = await db.events.toArray();
+    expect([e.catIds.map((id) => byId.get(id)), e.type]).toEqual([['Stormy', 'The Bandit'], 'Barfed']);
   });
 });

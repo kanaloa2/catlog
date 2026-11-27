@@ -14,6 +14,8 @@ import {
   guessColumns,
   guessTables,
   isMicrosoftTable,
+  preferLinkedEventTable,
+  tablesLinkingTo,
   loadTableMeta,
   EVENT_FIELDS,
   CAT_FIELDS,
@@ -157,11 +159,12 @@ export function DataversePanel() {
       const saved = loadMapping();
       const known = (name?: string) => (name && list.some((t) => t.logicalName === name) ? name : '');
       const guess = guessTables(list);
-      // A saved pick of one of Microsoft's own tables was an earlier, worse guess; prefer the new one.
-      const keep = (name: string | undefined, guessed: string) =>
-        name && isMicrosoftTable(name) && guessed && !isMicrosoftTable(guessed) ? '' : known(name);
-      const catTable = keep(saved?.catTable, guess.catTable) || guess.catTable;
-      const eventTable = keep(saved?.eventTable, guess.eventTable) || guess.eventTable;
+      // A saved pick of one of Microsoft's own tables was an earlier, wrong guess: kitty events never live there.
+      const keep = (name: string | undefined) => (name && isMicrosoftTable(name) ? '' : known(name));
+      const catTable = keep(saved?.catTable) || guess.catTable;
+      let eventTable = keep(saved?.eventTable);
+      if (!eventTable && catTable) eventTable = preferLinkedEventTable(list, await tablesLinkingTo(config, catTable), guess.eventTable);
+      eventTable ||= guess.eventTable;
       const next = await loadMetas(list, catTable, eventTable, saved);
       return { list, ...next };
     });

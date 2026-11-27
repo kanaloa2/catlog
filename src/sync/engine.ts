@@ -287,7 +287,7 @@ export class SyncEngine {
     for (const o of order) {
       const kind = current.get(`${o.table}\u0000${o.key}`) ? 'upsert' : 'delete';
       const last = groups[groups.length - 1];
-      if (last && last.table === o.table && last.kind === kind && last.ops.length < 500) last.ops.push(o);
+      if (last && last.table === o.table && last.kind === kind && last.ops.length < (kind === 'delete' ? 100 : 500)) last.ops.push(o);
       else groups.push({ table: o.table, kind, ops: [o] });
     }
 

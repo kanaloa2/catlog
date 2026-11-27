@@ -1,7 +1,9 @@
 import { db } from '../db';
 import type { Cat, CatEvent } from '../types';
 import { resizeImage } from '../lib/photo';
-import { normalizeType } from '../lib/eventTypes';
+import { EVENT_TYPES, joinNames, normalizeType } from '../lib/eventTypes';
+
+const BUILT_IN = new Set(EVENT_TYPES.map((t) => t.name));
 import { describeTables, dvGet, dvGetAll, dvGetBlob, FORMATTED, type ColumnSummary, type DvDeps, type TableInfo } from './api';
 import type { DataverseConfig } from './config';
 
@@ -168,8 +170,42 @@ export function guessTables(tables: TableInfo[]): { catTable: string; eventTable
     const siblings = own.filter((t) => t.logicalName !== catTable && prefixOf(t.logicalName) === prefix);
     if (siblings.length === 1) eventTable = siblings[0].logicalName;
   }
-  eventTable ||= best(tables, EVENT, undefined, catTable, prefix);
+  // Microsoft's own tables (AI Builder, Dynamics…) never hold kitty events, so don't guess one.
   return { catTable, eventTable };
+}
+
+/** Prefers, as the events table, one of your own tables that looks up the cats table. */
+export function preferLinkedEventTable(tables: TableInfo[], linked: string[], guess: string): string {
+  const own = new Set(tables.filter((t) => !isMicrosoftTable(t.logicalName)).map((t) => t.logicalName));
+  const candidates = linked.filter((n) => own.has(n));
+  if (!candidates.length) return guess;
+  if (candidates.includes(guess)) return guess;
+  const EVENT = /event|incident|accident|mess|log|record|entry|poo|barf|vomit/;
+  const named = candidates.find((n) => {
+    const t = tables.find((x) => x.logicalName === n)!;
+    return EVENT.test(squash(t.displayName)) || EVENT.test(bare(n));
+  });
+  return named ?? candidates[0];
+}
+
+/** Tables with a lookup or a many-to-many link to the given table. */
+export async function tablesLinkingTo(c: DataverseConfig, table: string, deps: DvDeps = {}): Promise<string[]> {
+  try {
+    const def = await dvGet<Json>(
+      c,
+      `EntityDefinitions(LogicalName='${table}')?$select=LogicalName&$expand=OneToManyRelationships($select=ReferencingEntity),ManyToManyRelationships($select=Entity1LogicalName,Entity2LogicalName)`,
+      deps,
+    );
+    const out = new Set<string>();
+    for (const r of (def.OneToManyRelationships as Json[]) ?? []) if (r.ReferencingEntity && r.ReferencingEntity !== table) out.add(String(r.ReferencingEntity));
+    for (const r of (def.ManyToManyRelationships as Json[]) ?? []) {
+      const other = r.Entity1LogicalName === table ? r.Entity2LogicalName : r.Entity1LogicalName;
+      if (other && other !== table) out.add(String(other));
+    }
+    return [...out];
+  } catch {
+    return [];
+  }
 }
 
 const TEXT = ['String', 'Memo'];
@@ -364,6 +400,8 @@ export interface PhotoJob {
 
 export interface Plan {
   cats: Cat[];
+  /** Cats from an earlier import that stood for several cats ("Stormy & The Bandit"): id → the real cats. */
+  combos: { id: string; name: string; members: string[] }[];
   events: CatEvent[];
   photos: PhotoJob[];
   fields: { cat: CatField[]; event: EventField[] };
@@ -398,9 +436,20 @@ export async function buildPlan(
     return id;
   };
 
+  const byDvIds = new Map<string, string[]>();
+  const combos: Plan['combos'] = [];
   if (cm) {
     const col = (f: CatField) => (m.cat[f] ? propFor(cm, m.cat[f]!) : '');
+    // A row like "Stormy & The Bandit" stands for several cats, so it isn't a cat of its own.
+    const names = new Set(src.cats.map((row) => (col('name') ? strip(textOf(row, col('name'))) : '')).filter(Boolean));
+    const comboRows = new Map<string, string[]>();
     for (const row of src.cats) {
+      const name = col('name') ? textOf(row, col('name')) : '';
+      const parts = splitCatNames(name);
+      if (parts.length > 1 && parts.every((n) => names.has(strip(n)) || SOMEBODY.test(n))) comboRows.set(String(row[cm.primaryId]), parts);
+    }
+    for (const row of src.cats) {
+      if (comboRows.has(String(row[cm.primaryId]))) continue;
       const dvId = String(row[cm.primaryId]);
       const name = col('name') ? textOf(row, col('name')) : '';
       if (!name) {
@@ -426,6 +475,18 @@ export async function buildPlan(
       });
       if (cm.image && row[`${cm.image.column}id`]) photos.push({ table: 'cats', id, record: `${cm.entitySet}(${dvId})`, image: cm.image });
     }
+    for (const [dvId, parts] of comboRows) {
+      const members: string[] = [];
+      for (const n of parts) {
+        const id = await addNamedCat(n);
+        if (!members.includes(id)) members.push(id);
+      }
+      byDvIds.set(dvId, members);
+      const name = parts.join(' & ');
+      combos.push({ id: await stableId(`dv-cat|${dvId}`), name, members });
+    }
+    if (combos.length)
+      warnings.push(`${joinNames(combos.map((c) => `“${c.name}”`))} ${combos.length === 1 ? 'is' : 'are'} more than one cat, so ${combos.length === 1 ? 'its' : 'their'} events go to each cat named.`);
   }
 
   const events: CatEvent[] = [];
@@ -446,7 +507,9 @@ export async function buildPlan(
         const v = row[col(f)];
         if (typeof v === 'string' && v) {
           const known = byDvId.get(v);
+          const several = byDvIds.get(v);
           if (known) push(known);
+          else if (several) several.forEach(push);
           else {
             const label = textOf(row, col(f));
             if (label) push(await addNamedCat(label));
@@ -456,7 +519,9 @@ export async function buildPlan(
       if (m.catLink && Array.isArray(row[m.catLink])) {
         for (const linked of row[m.catLink] as Json[]) {
           const known = byDvId.get(String(linked[catPk]));
+          const several = byDvIds.get(String(linked[catPk]));
           if (known) push(known);
+          else if (several) several.forEach(push);
           else if (cm && typeof linked[cm.primaryName] === 'string') push(await addNamedCat(String(linked[cm.primaryName])));
         }
       }
@@ -471,6 +536,8 @@ export async function buildPlan(
 
       let type = col('type') ? textOf(row, col('type')) : '';
       type = type ? normalizeType(type) : parsed.type;
+      // A type column that says something odd loses to a clear title ("Stormy Pooed").
+      if (parsed.type && BUILT_IN.has(parsed.type) && !BUILT_IN.has(type)) type = parsed.type;
       if (!type) {
         untyped++;
         type = 'Pooed';
@@ -501,6 +568,7 @@ export async function buildPlan(
 
   return {
     cats,
+    combos,
     events,
     photos,
     fields: {
@@ -626,6 +694,18 @@ export async function applyPlan(
       return out;
     });
     await db.cats.bulkPut(cats);
+
+    // An earlier import may have made "Stormy & The Bandit" a cat: move its events to the real cats.
+    for (const combo of plan.combos) {
+      if (!(await db.cats.get(combo.id))) continue;
+      const members = combo.members.map((id) => remap.get(id) ?? id);
+      const now = Date.now();
+      for (const e of await db.events.where('catIds').equals(combo.id).toArray()) {
+        const catIds = [...new Set(e.catIds.flatMap((id) => (id === combo.id ? members : [id])))];
+        await db.events.update(e.id, { catIds, updatedAt: now });
+      }
+      await db.cats.delete(combo.id);
+    }
 
     const oldEvents = await db.events.bulkGet(plan.events.map((e) => e.id));
     const events: CatEvent[] = plan.events.map((e, i) => {
