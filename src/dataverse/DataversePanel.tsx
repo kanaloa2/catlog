@@ -13,6 +13,7 @@ import {
   FIELD_LABELS,
   guessColumns,
   guessTables,
+  isMicrosoftTable,
   loadTableMeta,
   EVENT_FIELDS,
   CAT_FIELDS,
@@ -156,8 +157,11 @@ export function DataversePanel() {
       const saved = loadMapping();
       const known = (name?: string) => (name && list.some((t) => t.logicalName === name) ? name : '');
       const guess = guessTables(list);
-      const catTable = known(saved?.catTable) || guess.catTable;
-      const eventTable = known(saved?.eventTable) || guess.eventTable;
+      // A saved pick of one of Microsoft's own tables was an earlier, worse guess; prefer the new one.
+      const keep = (name: string | undefined, guessed: string) =>
+        name && isMicrosoftTable(name) && guessed && !isMicrosoftTable(guessed) ? '' : known(name);
+      const catTable = keep(saved?.catTable, guess.catTable) || guess.catTable;
+      const eventTable = keep(saved?.eventTable, guess.eventTable) || guess.eventTable;
       const next = await loadMetas(list, catTable, eventTable, saved);
       return { list, ...next };
     });

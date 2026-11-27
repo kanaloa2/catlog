@@ -132,22 +132,43 @@ export async function loadTableMeta(c: DataverseConfig, t: TableInfo, deps: DvDe
 const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
 const bare = (logical: string) => squash(logical.includes('_') ? logical.slice(logical.indexOf('_') + 1) : logical);
 
-/** Picks the most likely cats and events tables (by display or logical name). */
+/** Microsoft's own solutions (Dynamics, Power Pages…) also count as "custom" tables in Dataverse. */
+export function isMicrosoftTable(logical: string): boolean {
+  const prefix = logical.includes('_') ? logical.slice(0, logical.indexOf('_')) : '';
+  return /^(ms[a-z0-9]*|adx|powerpage[a-z]*)$/i.test(prefix);
+}
+
+const prefixOf = (logical: string) => (logical.includes('_') ? logical.slice(0, logical.indexOf('_')) : '');
+
+/**
+ * Picks the most likely cats and events tables (by display or logical name). Tables from the same
+ * publisher as the cats table, and anyone's own tables over Microsoft's, come first.
+ */
 export function guessTables(tables: TableInfo[]): { catTable: string; eventTable: string } {
+  const own = tables.filter((t) => !isMicrosoftTable(t.logicalName));
   const score = (t: TableInfo, words: RegExp[], avoid?: RegExp) => {
     const names = [squash(t.displayName), bare(t.logicalName)];
     if (avoid && names.some((n) => avoid.test(n))) return 0;
     for (let i = 0; i < words.length; i++) if (names.some((n) => words[i].test(n))) return words.length - i;
     return 0;
   };
-  const best = (words: RegExp[], avoid?: RegExp, not?: string) =>
-    tables
+  const best = (pool: TableInfo[], words: RegExp[], avoid?: RegExp, not?: string, prefix?: string) =>
+    pool
       .filter((t) => t.logicalName !== not)
-      .map((t) => ({ t, s: score(t, words, avoid) }))
+      .map((t) => ({ t, s: score(t, words, avoid), same: prefix && prefixOf(t.logicalName) === prefix ? 1 : 0 }))
       .filter((x) => x.s > 0)
-      .sort((a, b) => b.s - a.s || a.t.displayName.length - b.t.displayName.length)[0]?.t.logicalName ?? '';
-  const eventTable = best([/kittyevent|catevent/, /event/, /incident|accident|mess/, /log|record|entry/, /poo|barf|vomit/]);
-  const catTable = best([/^(kitty|kitties|kitten|kittens|cat|cats)$/, /kitty|kitties|kitten/, /cat|feline/, /pet|animal/], /event|log|record|incident/, eventTable);
+      .sort((a, b) => b.same - a.same || b.s - a.s || a.t.displayName.length - b.t.displayName.length)[0]?.t.logicalName ?? '';
+  const CAT = [/^(kitty|kitties|kitten|kittens|cat|cats)$/, /kitty|kitties|kitten/, /cat|feline/, /pet|animal/];
+  const EVENT = [/kittyevent|catevent/, /event/, /incident|accident|mess/, /log|record|entry/, /poo|barf|vomit/];
+  const catTable = best(own, CAT, /event|log|record|incident/) || best(tables, CAT, /event|log|record|incident/);
+  const prefix = prefixOf(catTable);
+  let eventTable = best(own, EVENT, undefined, catTable, prefix);
+  if (!eventTable && prefix) {
+    // No event-like name: if the cats table's publisher has just one other table, that's it.
+    const siblings = own.filter((t) => t.logicalName !== catTable && prefixOf(t.logicalName) === prefix);
+    if (siblings.length === 1) eventTable = siblings[0].logicalName;
+  }
+  eventTable ||= best(tables, EVENT, undefined, catTable, prefix);
   return { catTable, eventTable };
 }
 

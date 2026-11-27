@@ -48,6 +48,12 @@ describe('guessing', () => {
       eventTable: 'cr1_kittyevent',
     });
   });
+  it('skips Microsoft tables and prefers the cats table publisher', () => {
+    const t = (logicalName: string, displayName: string) => ({ logicalName, displayName, entitySet: logicalName + 's', isCustom: true });
+    const list = [t('msdyn_aievent', 'AI Event'), t('cr282_cat', 'Cat'), t('cr282_poop', 'Poop'), t('cr9_event', 'Event'), t('adx_webpage', 'Web Page')];
+    expect(guessTables(list)).toEqual({ catTable: 'cr282_cat', eventTable: 'cr282_poop' });
+    expect(guessTables([...list, t('cr282_catevent', 'Cat Event')])).toEqual({ catTable: 'cr282_cat', eventTable: 'cr282_catevent' });
+  });
   it('matches columns', () => {
     const g = guessColumns(catMeta, eventMeta);
     expect(g.cat).toMatchObject({ name: 'cr1_name', birthday: 'cr1_birthday', notes: 'cr1_notes' });
