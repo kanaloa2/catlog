@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { useCats } from '../hooks';
+import { useCats, useEvents } from '../hooks';
+import { joinNames } from '../lib/eventTypes';
+import type { Cat, CatEvent } from '../types';
 import { appUrl, supabase } from '../supabase';
 import { createKey, deleteKey, forgetKey, hasWorkerApi, listKeys, logText, rememberKey, savedKey, addUrl, RPC_URL, LOG_RPC_URL, PUBLIC_KEY, sha256Hex, type ShortcutKey } from '../lib/shortcuts';
 import { ago } from '../lib/format';
@@ -25,9 +27,26 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
   );
 }
 
+/** Pairs of cats that often go together (like "Stormy & The Bandit"), most common first. */
+export function catPairs(cats: Cat[], events: CatEvent[], min = 3): Cat[][] {
+  const real = new Map(cats.filter((c) => !c.isSomebody && !c.archived).map((c) => [c.id, c]));
+  const counts = new Map<string, number>();
+  for (const e of events) {
+    const ids = e.catIds.filter((id) => real.has(id));
+    if (ids.length !== 2 || ids.length !== e.catIds.length) continue;
+    const key = [...ids].sort().join('|');
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts]
+    .filter(([, n]) => n >= min)
+    .sort((a, b) => b[1] - a[1])
+    .map(([key]) => key.split('|').map((id) => real.get(id)!).sort((a, b) => a.name.localeCompare(b.name)));
+}
+
 /** Settings → Shortcuts: a key for iOS Shortcuts, links per cat, and how to set them up. */
 export function ShortcutsPanel() {
   const cats = useCats();
+  const events = useEvents();
   const [keys, setKeys] = useState<ShortcutKey[] | null>(null);
   const [key, setKey] = useState(savedKey);
   const [keyValid, setKeyValid] = useState<boolean | null>(null);
@@ -78,6 +97,7 @@ export function ShortcutsPanel() {
   }
 
   const active = (cats ?? []).filter((c) => !c.archived);
+  const pairs = catPairs(cats ?? [], events ?? []);
   const usable = key && keyValid !== false;
 
   return (
@@ -110,7 +130,7 @@ export function ShortcutsPanel() {
         <>
           <h3>Your links</h3>
           <p className="muted small">
-            Each link logs one event the moment it’s opened. Use “Somebody” when you don’t know who did it; you can change it later.
+            Each link logs one event the moment it’s opened. Use “Somebody” when you don’t know who did it; you can change it later. Cats that often go together get a link for both.
           </p>
           {api === null ? (
             <p className="muted small">Checking…</p>
@@ -126,6 +146,15 @@ export function ShortcutsPanel() {
                   </li>
                 )),
               )}
+              {pairs.map((pair) => {
+                const names = joinNames(pair.map((c) => c.name));
+                return (
+                  <li key={pair.map((c) => c.id).join('+')}>
+                    <span>💩 {names} pooed</span>
+                    <CopyButton text={addUrl(api, key, names, 'Pooed')} label="Copy link" />
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <div className="callout">
