@@ -219,6 +219,8 @@ function friendly(message: string): string {
   if (/invalid login credentials/i.test(message)) return 'That email and password don’t match. CatLog uses the same password as Packlist and Pickup.';
   if (/email not confirmed/i.test(message)) return 'Please confirm your email first. Check your inbox for the link.';
   if (/already registered|already exists/i.test(message)) return 'An account with that email already exists. Try signing in.';
+  if (/email rate limit/i.test(message))
+    return 'Too many emails were sent from this account in the last hour. Try again in about an hour, or change your password in Packlist or Pickup if you’re signed in there.';
   if (/rate limit|too many/i.test(message)) return 'Too many attempts. Please wait a few minutes and try again.';
   if (/failed to fetch|network/i.test(message)) return 'Can’t reach the server. Check your connection and try again.';
   return message;
