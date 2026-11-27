@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from 'react';
-import { appUrl, supabase } from '../supabase';
+import { appUrl, sendPasswordReset, supabase } from '../supabase';
 
 function Shell({ children }: { children: ReactNode }) {
   return (
@@ -57,14 +57,20 @@ export function AuthScreen({ notice }: { notice?: string }) {
           options: { emailRedirectTo: appUrl() },
         });
         if (error) throw error;
+        if (data.user && data.user.identities?.length === 0) {
+          // Supabase answers a sign-up for an existing email like a new one, and changes nothing.
+          setMode('signin');
+          setInfo(`${email.trim()} already has an account from Packlist or Pickup. Sign in with that password, or tap Forgot password to choose a new one.`);
+          return;
+        }
         if (!data.session) {
           setMode('signin');
           setInfo(`Almost there. We sent a confirmation link to ${email.trim()}. Open it, then sign in here.`);
         }
       } else {
-        const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), { redirectTo: appUrl() });
+        const { error } = await sendPasswordReset(email.trim());
         if (error) throw error;
-        setInfo(`If ${email.trim()} has an account, a reset link is on its way. Open it on this device to choose a new password.`);
+        setInfo(`If ${email.trim()} has an account, a reset link is on its way. Open it on any device to choose a new password.`);
       }
     } catch (err) {
       setError(friendly((err as Error).message));
@@ -151,10 +157,21 @@ export function AuthScreen({ notice }: { notice?: string }) {
   );
 }
 
-export function SetPasswordScreen({ onDone }: { onDone: () => void }) {
+export function SetPasswordScreen({ onDone, backTo }: { onDone: () => void; backTo?: string }) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
+  if (saved && backTo)
+    return (
+      <Shell>
+        <h2 className="auth-title">Password changed</h2>
+        <p className="muted center auth-sub">Use it to sign in to CatLog, Packlist and Pickup.</p>
+        <a className="btn btn-primary btn-block" href={backTo}>
+          Open CatLog
+        </a>
+      </Shell>
+    );
   return (
     <Shell>
       <h2 className="auth-title">Choose a new password</h2>
@@ -168,6 +185,7 @@ export function SetPasswordScreen({ onDone }: { onDone: () => void }) {
           const { error } = await supabase.auth.updateUser({ password });
           setBusy(false);
           if (error) setError(friendly(error.message));
+          else if (backTo) setSaved(true);
           else onDone();
         }}
       >
@@ -198,7 +216,7 @@ export function SetPasswordScreen({ onDone }: { onDone: () => void }) {
 }
 
 function friendly(message: string): string {
-  if (/invalid login credentials/i.test(message)) return 'That email and password don’t match an account.';
+  if (/invalid login credentials/i.test(message)) return 'That email and password don’t match. CatLog uses the same password as Packlist and Pickup.';
   if (/email not confirmed/i.test(message)) return 'Please confirm your email first. Check your inbox for the link.';
   if (/already registered|already exists/i.test(message)) return 'An account with that email already exists. Try signing in.';
   if (/rate limit|too many/i.test(message)) return 'Too many attempts. Please wait a few minutes and try again.';

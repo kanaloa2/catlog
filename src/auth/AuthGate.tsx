@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import type { Session } from '@supabase/supabase-js';
-import { supabase } from '../supabase';
+import { pendingRecovery, supabase } from '../supabase';
 import { clearLocalData, localOwner, setLocalOwner, sync } from '../sync';
 import { AuthScreen, SetPasswordScreen, Splash } from './AuthScreens';
 
@@ -20,7 +20,7 @@ export function useAuth() {
 type Phase =
   | { kind: 'loading' }
   | { kind: 'signedOut'; notice?: string }
-  | { kind: 'recovery'; session: Session }
+  | { kind: 'recovery'; session: Session; backTo?: string }
   | { kind: 'ready'; session: Session };
 
 /**
@@ -35,6 +35,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
     setPhaseState(p);
   };
   const preparedFor = useRef<string | null>(null);
+  // A reset link's tokens, read from the address by supabase.ts. While set, sign-in events wait.
+  const recovering = useRef(!!pendingRecovery?.tokens);
   const hadCode = useRef(new URLSearchParams(window.location.search).has('code'));
 
   async function prepare(session: Session) {
@@ -60,14 +62,30 @@ export function AuthGate({ children }: { children: ReactNode }) {
       setTimeout(() => {
         if (event === 'PASSWORD_RECOVERY' && session) {
           setPhase({ kind: 'recovery', session });
+        } else if (recovering.current) {
+          // Waiting for the reset link's session; ignore the start-up events meanwhile.
         } else if (event === 'SIGNED_OUT' || !session) {
           preparedFor.current = null;
           if (phaseRef.current.kind !== 'signedOut') setPhase({ kind: 'signedOut' });
         } else if (event === 'INITIAL_SESSION' || event === 'SIGNED_IN') {
-          if (phaseRef.current.kind !== 'recovery') void prepare(session);
+          if (phaseRef.current.kind !== 'recovery' && !recovering.current) void prepare(session);
         }
       }, 0);
     });
+    if (pendingRecovery?.tokens) {
+      const backTo = pendingRecovery.backTo;
+      void supabase.auth.setSession(pendingRecovery.tokens).then(({ data, error }) => {
+        if (cancelled) return;
+        if (error || !data.session) {
+          recovering.current = false;
+          setPhase({ kind: 'signedOut', notice: 'That reset link has expired or was already used. Send a new one below.' });
+        } else setPhase({ kind: 'recovery', session: data.session, backTo });
+      });
+      return () => {
+        cancelled = true;
+        sub.subscription.unsubscribe();
+      };
+    }
     supabase.auth.getSession().then(({ data }) => {
       if (cancelled) return;
       // Tidy the ?code=… left by an email link.
@@ -77,7 +95,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
       if (!data.session) {
         setPhase({
           kind: 'signedOut',
-          notice: hadCode.current
+          notice: pendingRecovery?.error
+            ? pendingRecovery.error
+            : hadCode.current
             ? 'If you just confirmed your email, sign in below. (Email links only sign you in automatically on the device where you created the account.)'
             : undefined,
         });
@@ -115,7 +135,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     case 'recovery':
       return (
         <SetPasswordScreen
+          backTo={phase.backTo}
           onDone={() => {
+            recovering.current = false;
             preparedFor.current = null;
             void prepare(phase.session);
           }}
